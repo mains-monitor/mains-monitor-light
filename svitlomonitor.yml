@@ -1,0 +1,146 @@
+# В цьому місці знаходяться змінні, значення яких буде підставлятися в інші місця цього файлу
+substitutions:
+  TELEGRAM_BOT_TOKEN: 'ВАШ_БОТ_ТОКЕН' # Цей токен ви мали отримати під час створення бота у @BotFather
+  chat_id: 'ВАШ_ЧАТ_АЙДІ' # Чат ID можна дізнатися, відкривши https://api.telegram.org/bot<YourBOTToken>/getUpdates
+  ac_sense_pin: '22' # номер цифрового виводу, до якого ви припаяли провід (орієнтуємось на відео)
+
+# Налаштування esphome
+esphome:
+  name: acmon # Ім'я пристрою, можете змінити за бажанням
+  includes:
+    - helpers.h # Файл з допоміжною функцією для форматування повідомлень
+
+# Налаштування плати esp32
+esp32:
+  board: lolin32 # тип плати
+  framework:
+    type: arduino
+
+# Увімкнення логування (діагностичні сповіщення в консолі)
+logger:
+
+# Налаштування API для Home Assistant
+api:
+  password: "ПРИДУМАЙТЕ_ПАРОЛЬ"
+
+# Налаштування OTA для оновлення прошивки через Wi-Fi
+ota:
+  password: "ПРИДУМАЙТЕ_ПАРОЛЬ"
+
+# Налаштування підключення до Wi-Fi мережі
+wifi:
+  ssid: "НАЗВА_МЕРЕЖІ"      # Вкажіть тут реальну назву мережі, яку буде використовувати пристрій
+  password: "ПАРОЛЬ_МЕРЕЖІ" # Вкажіть пароль мережі
+
+  # Налаштування точки доступу, яка з'явиться, якщо не вдасться підключитися до основної мережі вище
+  ap:
+    ssid: "ПРИДУМАЙТЕ_НАЗВУ_ТОЧКИ_ДОСТУПУ"
+    password: "ПРИДУМАЙТЕ_ПАРОЛЬ_ТОЧКИ_ДОСТУПУ"
+
+# Якщо налаштована мережа буде недоступна, то пристрій відкриє точку доступу з налаштуваннями вище
+# А при підключенні до неї відкриється сторінка налаштувань пристрою
+captive_portal:
+
+web:                   # Налаштування веб-сервера для відображення сторінки налаштувань пристрою та діагностики
+  server_port: 8080    # Якщо все запрацює як треба, то ви зможете відкрити сторінку пристрою за адресою http://acmon.local:8080
+  auth:
+    username: admin    # Логін для доступу до сторінки, змініть за бажанням
+    password: admin    # Пароль для доступу до сторінки, змініть за бажанням
+
+# Налаштування синхронізації часу з серверами NTP
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Kyiv
+    servers:
+     - 0.pool.ntp.org
+     - 1.pool.ntp.org
+     - 2.pool.ntp.org
+    on_time_sync:
+      then:
+        - logger.log: "Synchronized system clock"
+
+# Налаштування модуля для відправки HTTP-запитів
+http_request:
+  useragent: esphome/device
+  timeout: 10s
+
+# Глобальні змінні
+globals:
+
+# Глобальна змінна для сберігання часу останньої зміни стану
+   - id: last_state_change_seconds
+     type: long long
+     restore_value: yes
+     initial_value: '0'
+
+script:
+
+# Скрипт для відправки повідомлення про вимкнення світла
+  - id: send_off_notification
+    mode: restart
+    then:
+      - http_request.post:
+          # Відправка повідомлення в Telegram - це просто HTTP POST запит з вказанням бот токену, тексту повідомлення та ідентифікатора чату, куди відправляти повідомлення
+          url: "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+          headers:
+            Content-Type: application/json
+          json:
+            chat_id: ${chat_id}
+            # Текст повідомлення буде генерувати функція prep код якої міститься у helpers.h
+            text: !lambda |-
+              return prepare_message("О ні! Світло вимкнули!\nСвітло було %s", "О ні! Світло вимкнули!");
+          verify_ssl: false
+      - logger.log: "Sent OFF notification"
+
+# Скрипт для відправки повідомлення про ввімкнення світла
+  - id: send_on_notification
+    mode: restart
+    then:
+      - http_request.post:
+          url: "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+          headers:
+            Content-Type: application/json
+          json:
+            chat_id: ${chat_id}
+            text: !lambda |-
+              return prepare_message("Ура! Світло ввімкнули!\nСвітла не було %s", "Ура! Світло ввімкнули!");
+          verify_ssl: false
+      - logger.log: "Sent ON notification"
+
+# Скрипт для оновлення часу останньої зміни стану
+  - id: update_last_state_change_seconds
+    then:
+      - if:
+          condition:
+            time.has_time:
+          then:
+            - globals.set:
+                id: last_state_change_seconds
+                value: !lambda 'return id(sntp_time).now().timestamp;'
+            - logger.log: 
+                format: "Updated last_state_change_seconds to: %lld"
+                args: ['id(last_state_change_seconds)']
+          else:
+            - logger.log: "Failed to update last_state_change_seconds, time is not ready"
+
+# Налаштування віртуального датчика для вимірювання стану електромережі
+binary_sensor:
+  - platform: gpio
+    name: "AC Sensor"
+    pin:
+      number: ${ac_sense_pin} # ось сюди підставиться номер цифрового виводу, до якого ви припаювалися
+      mode:
+        input: true
+    id: ac_sensor
+    on_state: # коли зміниться стан сенсора, то ...
+      then:
+        - if:
+            condition:
+              binary_sensor.is_on: ac_sensor # якщо стан сенсора "ввімкнено" (тобто світло ввімкнули)
+            then:
+              - script.execute: send_on_notification # викликаємо скрипт для відправки повідомлення про ввімкнення світла
+              - script.execute: update_last_state_change_seconds # оновлюємо час останньої зміни стану
+            else: # якщо стан сенсора "вимкнено" (тобто світло вимкнули)
+              - script.execute: send_off_notification # викликаємо скрипт для відправки повідомлення про вимкнення світла
+              - script.execute: update_last_state_change_seconds # оновлюємо час останньої зміни стану
